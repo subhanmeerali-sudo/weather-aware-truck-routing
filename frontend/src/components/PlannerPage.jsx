@@ -5,7 +5,13 @@ import CheckpointList from './CheckpointList.jsx'
 import TripMap from './TripMap.jsx'
 import HeatControls from './HeatControls.jsx'
 import { askServerForTrip } from '../lib/askTheServer.js'
-import { getTheHeatWeather, heatNeedsWeather } from '../lib/getTheHeatWeather.js'
+import {
+  getTheCheckpointWeather,
+  getTheHeatWeather,
+  heatNeedsWeather,
+  planNeedsWeather,
+} from '../lib/getTheHeatWeather.js'
+import { fillInRiskAndPickWinner } from '../lib/pickTheRoad.js'
 
 // the main screen. form + results on the left, big map on the right
 export default function PlannerPage() {
@@ -18,10 +24,35 @@ export default function PlannerPage() {
   const [heatKind, setHeatKind] = useState('risk')
   const [heatIsOn, setHeatIsOn] = useState(true)
   const [isPlaying, setIsPlaying] = useState(false)
+  const [weatherStatus, setWeatherStatus] = useState('idle') // idle | loading | ready | oops
   const [heatStatus, setHeatStatus] = useState('idle') // idle | loading | ready | oops
-  const tripNumber = useRef(0) // so an old slow heat answer cant overwrite a newer trip
+  const tripNumber = useRef(0) // so an old slow weather answer cant overwrite a newer trip
 
-  // after the trip comes back, the browser goes and gets the heatmap weather itself
+  // after the trip comes back, the browser gets checkpoint weather + picks the best road
+  async function fillInCheckpointWeather(answer, myTripNumber) {
+    if (!planNeedsWeather(answer)) {
+      setWeatherStatus('ready')
+      return answer
+    }
+    setWeatherStatus('loading')
+    try {
+      const weatherBySpot = await getTheCheckpointWeather(answer.routes)
+      if (myTripNumber !== tripNumber.current) return null
+      const filled = fillInRiskAndPickWinner(answer, weatherBySpot)
+      setPlan(filled)
+      setPickedRouteId(filled.recommendation.route_id)
+      setWeatherStatus('ready')
+      return filled
+    } catch (err) {
+      if (myTripNumber !== tripNumber.current) return null
+      console.warn('checkpoint weather failed', err)
+      setWeatherStatus('oops')
+      setOops(err.message || 'Could not load weather for checkpoints.')
+      return answer
+    }
+  }
+
+  // heatmap weather can take longer; run it after (or alongside) checkpoints
   async function fillInTheHeat(answer, myTripNumber) {
     if (!heatNeedsWeather(answer.heatmap)) {
       setHeatStatus('ready')
@@ -30,10 +61,12 @@ export default function PlannerPage() {
     setHeatStatus('loading')
     try {
       const frames = await getTheHeatWeather(answer.heatmap, answer.load_lbs)
-      if (myTripNumber !== tripNumber.current) return // a newer trip showed up, ignore this one
-      setPlan((old) =>
-        old === answer ? { ...old, heatmap: { ...old.heatmap, ...frames, needs_client_weather: false } } : old,
-      )
+      if (myTripNumber !== tripNumber.current) return
+      setPlan((old) => {
+        if (!old) return old
+        // merge onto whatever plan is current (might already have risk filled in)
+        return { ...old, heatmap: { ...old.heatmap, ...frames, needs_client_weather: false } }
+      })
       setHeatStatus('ready')
     } catch (err) {
       if (myTripNumber !== tripNumber.current) return
@@ -42,23 +75,31 @@ export default function PlannerPage() {
     }
   }
 
-  // asks the server for the trip and saves the answer
+  // asks the server for the trip (roads only) then fills weather in the browser
   async function getTheTrip(form) {
     setIsLoading(true)
     setOops('')
     setIsPlaying(false)
+    setWeatherStatus('idle')
+    setHeatStatus('idle')
     tripNumber.current += 1
     const myTripNumber = tripNumber.current
     try {
       const answer = await askServerForTrip(form)
+      // show roads on the map RIGHT AWAY (before weather)
       setPlan(answer)
-      fillInTheHeat(answer, myTripNumber) // no await on purpose, the routes show up right away
-      setPickedRouteId(answer.recommendation.route_id) // start with the best one picked
+      setPickedRouteId(answer.recommendation.route_id)
       setFocusedIndex(null)
       setHeatHour(0)
+      setIsLoading(false)
+
+      // weather in the browser (checkpoints first so cards/risk update fast)
+      const filled = await fillInCheckpointWeather(answer, myTripNumber)
+      if (myTripNumber !== tripNumber.current) return
+      // heat can keep going; use the original heatmap geometry either way
+      fillInTheHeat(filled || answer, myTripNumber)
     } catch (err) {
       setOops(err.message)
-    } finally {
       setIsLoading(false)
     }
   }
@@ -92,13 +133,27 @@ export default function PlannerPage() {
           </div>
         )}
 
-        {plan && <RouteCards plan={plan} pickedRouteId={pickedRouteId} onPickRoute={pickARoad} />}
-        {pickedRoute && <CheckpointList route={pickedRoute} focusedIndex={focusedIndex} onFocus={setFocusedIndex} />}
+        {plan && (
+          <RouteCards
+            plan={plan}
+            pickedRouteId={pickedRouteId}
+            onPickRoute={pickARoad}
+            weatherStatus={weatherStatus}
+          />
+        )}
+        {pickedRoute && (
+          <CheckpointList
+            route={pickedRoute}
+            focusedIndex={focusedIndex}
+            onFocus={setFocusedIndex}
+            weatherStatus={weatherStatus}
+          />
+        )}
 
         {plan && (
           <footer className="meta">
-            Planned in {plan.meta.took_seconds}s · {plan.meta.weather_spots} checkpoint weather points · Routing © OSRM/OpenStreetMap ·
-            Weather © Open-Meteo
+            Planned in {plan.meta.took_seconds}s · {plan.meta.weather_spots} checkpoint weather points · Routing ©
+            OSRM/OpenStreetMap · Weather © Open-Meteo
           </footer>
         )}
       </aside>
@@ -112,6 +167,7 @@ export default function PlannerPage() {
           heatKind={heatKind}
           heatIsOn={heatIsOn}
           focusedIndex={focusedIndex}
+          weatherStatus={weatherStatus}
         />
         {plan && (
           <HeatControls
@@ -130,7 +186,13 @@ export default function PlannerPage() {
         {isLoading && (
           <div className="map-loading">
             <span className="spinner spinner--big" />
-            Finding roads and checking the sky…
+            Finding roads…
+          </div>
+        )}
+        {!isLoading && weatherStatus === 'loading' && (
+          <div className="map-loading map-loading--soft">
+            <span className="spinner" />
+            Checking weather…
           </div>
         )}
       </section>

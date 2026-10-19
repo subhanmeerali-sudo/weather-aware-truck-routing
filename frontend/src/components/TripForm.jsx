@@ -88,7 +88,7 @@ export default function TripForm({ isLoading, onPlan }) {
 
       <button className="plan-btn" type="submit" disabled={isLoading}>
         {isLoading ? <span className="spinner" /> : null}
-        {isLoading ? 'Checking roads + weather…' : 'Plan my trip'}
+        {isLoading ? 'Finding roads…' : 'Plan my trip'}
       </button>
 
       <div className="examples">

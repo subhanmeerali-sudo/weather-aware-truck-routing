@@ -1,6 +1,6 @@
 """
-makes sure the server only asks for weather at the checkpoints now, and NOT
-for the ~140 heatmap dots (the browser does those so Render doesnt get a 429).
+makes sure the server NEVER asks Open-Meteo. weather (checkpoints + heatmap)
+comes from the browser so Render's shared IP doesnt get a 429.
 """
 from datetime import datetime, timedelta, timezone
 from unittest import mock
@@ -8,7 +8,6 @@ from unittest import mock
 from django.test import SimpleTestCase
 
 from trips.services import plan_trip as plan_module
-from trips.services.get_weather import round_spot
 from trips.services.map_math import add_up_the_miles
 
 DENVER = {"query": "Denver", "name": "Denver", "lat": 39.7392, "lon": -104.9903}
@@ -36,43 +35,24 @@ def fake_road(wiggle):
     }
 
 
-def fake_weather(spots, start_utc, end_utc):
-    """calm weather for every spot we get asked about"""
-    t0 = int(start_utc.replace(minute=0, second=0, microsecond=0).timestamp()) - 3600
-    hours = int((end_utc - start_utc).total_seconds() // 3600) + 4
-    series = {
-        "times": [t0 + 3600 * h for h in range(hours)],
-        "wind_mph": [5.0] * hours,
-        "gust_mph": [8.0] * hours,
-        "rain_in_hr": [0.0] * hours,
-        "snow_in_hr": [0.0] * hours,
-        "temp_f": [50.0] * hours,
-    }
-    return {round_spot(lat, lon): series for lat, lon in spots}
-
-
-class PlanSkipsHeatWeatherTest(SimpleTestCase):
+class PlanSkipsAllWeatherTest(SimpleTestCase):
     def setUp(self):
         self.departure = datetime.now(timezone.utc).replace(microsecond=0) + timedelta(hours=1)
 
-    @mock.patch.object(plan_module, "get_the_weather", side_effect=fake_weather)
     @mock.patch.object(plan_module, "get_the_roads", side_effect=lambda o, d: ([fake_road(0), fake_road(0.4), fake_road(-0.4)], []))
     @mock.patch.object(plan_module, "find_where_place_is", side_effect=lambda t: DENVER if "Denver" in t else SLC)
-    def test_only_checkpoints_get_weather(self, _places, _roads, weather_mock):
-        plan = plan_module.plan_the_trip("Denver, CO", "Salt Lake City, UT", self.departure, 35000, 50)
+    def test_plan_never_calls_open_meteo(self, _places, _roads):
+        # if plan_the_trip still imported get_the_weather somehow and called it, this would fail
+        with mock.patch("trips.services.get_weather.get_the_weather") as weather_mock:
+            with mock.patch("trips.services.get_weather.ask_open_meteo") as ask_mock:
+                plan = plan_module.plan_the_trip("Denver, CO", "Salt Lake City, UT", self.departure, 35000, 50)
 
-        # only ONE weather ask, and only checkpoint spots in it
-        self.assertEqual(weather_mock.call_count, 1)
-        asked_spots = weather_mock.call_args[0][0]
-        checkpoint_spots = [(cp["lat"], cp["lon"]) for r in plan["routes"] for cp in r["checkpoints"]]
-        self.assertEqual(len(asked_spots), len(checkpoint_spots))
-        unique = {round_spot(lat, lon) for lat, lon in asked_spots}
-        self.assertLessEqual(len(unique), 40)  # fits in one Open-Meteo request
+        weather_mock.assert_not_called()
+        ask_mock.assert_not_called()
 
-        # the window is just the trip, not +48h anymore
-        _, start, end = weather_mock.call_args[0]
-        longest = max(r["duration_seconds"] for r in plan["routes"])
-        self.assertAlmostEqual((end - start).total_seconds(), longest, delta=2)
+        # top-level flag so the UI knows to fetch weather itself
+        self.assertTrue(plan["needs_client_weather"])
+        self.assertTrue(plan["meta"]["needs_client_weather"])
 
         # heatmap: dots + times, but the weather is left for the browser
         heat = plan["heatmap"]
@@ -83,8 +63,28 @@ class PlanSkipsHeatWeatherTest(SimpleTestCase):
         for key in ("wind_mph", "rain_in_hr", "snow_in_hr", "risk"):
             self.assertEqual(heat[key], [])
 
-        # the normal stuff still works
+        # routes still pack geometry + checkpoints with ETAs, but no weather/risk yet
         self.assertEqual(len(plan["routes"]), 3)
+        checkpoint_count = 0
+        for route in plan["routes"]:
+            self.assertGreater(len(route["geometry"]), 1)
+            self.assertGreater(len(route["checkpoints"]), 1)
+            for cp in route["checkpoints"]:
+                checkpoint_count += 1
+                self.assertIsNotNone(cp["eta"])
+                self.assertIsNotNone(cp["lat"])
+                self.assertIsNotNone(cp["lon"])
+                self.assertIsNone(cp["weather"])
+                self.assertIsNone(cp["risk"])
+            self.assertEqual(route["summary"]["severe_miles"], 0.0)
+            self.assertEqual(route["summary"]["high_miles"], 0.0)
+
+        self.assertEqual(plan["meta"]["weather_spots"], checkpoint_count)
         self.assertIn(plan["recommendation"]["route_id"], {"a", "b", "c"})
-        self.assertEqual(plan["meta"]["weather_spots"], len(unique))
-        self.assertEqual(plan["routes"][0]["checkpoints"][0]["risk"]["level"], "Low")
+        self.assertIn("Checking weather", plan["recommendation"]["reason"])
+
+    def test_plan_module_does_not_import_get_the_weather(self):
+        # hard guard: plan_trip must not even pull get_the_weather into its namespace
+        self.assertFalse(hasattr(plan_module, "get_the_weather"))
+        self.assertFalse(hasattr(plan_module, "look_up_weather"))
+        self.assertFalse(hasattr(plan_module, "check_if_scary"))

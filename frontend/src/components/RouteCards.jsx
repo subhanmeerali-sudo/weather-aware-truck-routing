@@ -29,7 +29,7 @@ function ScaryChip({ level }) {
 }
 
 // one card per road with all the important numbers
-function RouteCard({ route, isPicked, onPick }) {
+function RouteCard({ route, isPicked, onPick, waiting }) {
   const s = route.summary
   const totalMiles = Object.values(s.miles_by_level).reduce((a, b) => a + b, 0) || 1
   return (
@@ -41,7 +41,7 @@ function RouteCard({ route, isPicked, onPick }) {
       <div className="route-card__top">
         <span className="route-card__swatch" />
         <strong>{route.label}</strong>
-        {route.recommended && <span className="best-badge">★ Best pick</span>}
+        {route.recommended && !waiting && <span className="best-badge">★ Best pick</span>}
         <span className="route-card__rank">#{route.rank}</span>
       </div>
       <div className="route-card__stats">
@@ -58,30 +58,37 @@ function RouteCard({ route, isPicked, onPick }) {
           <b title={route.arrival}>{prettyClock(route.arrival)}</b>
         </div>
       </div>
-      <ScaryMilesBar milesByLevel={s.miles_by_level} totalMiles={totalMiles} />
-      <div className="route-card__risk">
-        <span>
-          Severe+ <b>{s.severe_miles.toFixed(0)} mi</b>
-        </span>
-        <span>
-          High <b>{s.high_miles.toFixed(0)} mi</b>
-        </span>
-        <span>
-          Avg <b>{s.avg_risk.toFixed(2)}</b>
-        </span>
-        <ScaryChip level={s.worst_level} />
-      </div>
+      {waiting ? (
+        <div className="route-card__wait">Checking weather…</div>
+      ) : (
+        <>
+          <ScaryMilesBar milesByLevel={s.miles_by_level} totalMiles={totalMiles} />
+          <div className="route-card__risk">
+            <span>
+              Severe+ <b>{s.severe_miles.toFixed(0)} mi</b>
+            </span>
+            <span>
+              High <b>{s.high_miles.toFixed(0)} mi</b>
+            </span>
+            <span>
+              Avg <b>{s.avg_risk.toFixed(2)}</b>
+            </span>
+            <ScaryChip level={s.worst_level} />
+          </div>
+        </>
+      )}
     </button>
   )
 }
 
-export default function RouteCards({ plan, pickedRouteId, onPickRoute }) {
-  const best = plan.routes.find((r) => r.id === plan.recommendation.route_id)
+export default function RouteCards({ plan, pickedRouteId, onPickRoute, weatherStatus }) {
+  const waiting = weatherStatus === 'loading' || weatherStatus === 'idle'
+  const best = plan.routes.find((r) => r.id === plan.recommendation.route_id) || plan.routes[0]
   return (
     <section className="results">
       <div className="recommendation" style={{ '--road-color': colorForRoad(best.id) }}>
         <div className="recommendation__label">Our Recomendation</div>
-        <div className="recommendation__route">{best.label}</div>
+        <div className="recommendation__route">{waiting ? 'Checking weather…' : best.label}</div>
         <p>{plan.recommendation.reason}</p>
       </div>
       {plan.warnings.map((w) => (
@@ -91,7 +98,13 @@ export default function RouteCards({ plan, pickedRouteId, onPickRoute }) {
       ))}
       <div className="route-list">
         {plan.routes.map((route) => (
-          <RouteCard key={route.id} route={route} isPicked={route.id === pickedRouteId} onPick={onPickRoute} />
+          <RouteCard
+            key={route.id}
+            route={route}
+            isPicked={route.id === pickedRouteId}
+            onPick={onPickRoute}
+            waiting={waiting}
+          />
         ))}
       </div>
     </section>

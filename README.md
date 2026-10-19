@@ -21,10 +21,11 @@ Built for the Spotter Full Stack Developer take-home.
    3, it forces detours through via-points left/right of the main route and drops near-duplicates).
 3. It drops a **checkpoint every N miles** (plus start and end) and computes the truck's **ETA** at each one
    from OSRM's per-segment durations.
-4. It fetches **hourly** wind / rain / snow from **Open-Meteo** for all checkpoints in batched multi-location
-   requests and **linearly interpolates to each checkpoint's exact ETA**.
-5. Each checkpoint gets a **risk level** (rules below), each route gets a summary (miles per level, Severe+ miles,
-   High miles, distance-weighted average risk), and the best route is recommended.
+4. The **browser** fetches **hourly** wind / rain / snow from **Open-Meteo** for all checkpoints (and the corridor
+   heatmap) — the Django server never calls Open-Meteo (Render's shared egress IP is rate-limited). Weather is
+   **linearly interpolated to each checkpoint's exact ETA**.
+5. Each checkpoint gets a **risk level** (same PDF rules, in JS), each route gets a summary (miles per level, Severe+ miles,
+   High miles, distance-weighted average risk), and the best route is recommended in the browser.
 6. The map shows all 3 routes, risk-colored checkpoints with ETA popups, start/end pins, and a **corridor heatmap**
    with a **0–48 h forecast slider** (play button included). Truck icons show where each route's truck would be
    at the selected hour.

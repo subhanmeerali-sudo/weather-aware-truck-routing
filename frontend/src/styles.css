@@ -184,3 +184,8 @@ input, select { font: inherit; }
 /* little "loading corridor forecast" line under the slider (shows on phones too) */
 .heat-controls__loading { display: flex !important; align-items: center; gap: 6px; color: var(--white); }
 .heat-controls__loading .spinner { width: 12px; height: 12px; border-width: 2px; }
+
+.map-loading--soft { inset: auto; top: 12px; left: 50%; transform: translateX(-50%); background: rgba(0, 24, 48, 0.85); color: var(--white); padding: 10px 16px; border-radius: 999px; display: flex; align-items: center; gap: 10px; backdrop-filter: blur(4px); }
+.route-card__wait { font-size: 0.85rem; color: var(--muted); padding: 8px 0 2px; font-style: italic; }
+.checkpoints__wait { color: var(--teal); font-weight: 500; }
+.chip--wait { background: #cbd5e1; color: #334155; }

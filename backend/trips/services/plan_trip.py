@@ -4,25 +4,25 @@ The big boss function that runs the whole trip plan, step by step:
   1. find where the places are (geocode)
   2. get 3 roads (OSRM)
   3. drop checkpoints on each road + figure out ETAs
-  4. get the weather for every checkpoint ONLY (Open-Meteo, batched)
-     (the heatmap dots get their weather from the browser now, see below)
-  5. decide how scary each checkpoint is
-  6. pick the best road
-  7. pack it all up for the frontend
+  4. pack geometry + heat dots/times for the frontend
+     (NO Open-Meteo calls here! Render shares its IP with a bunch of other
+     apps so Open-Meteo keeps saying "too many requests". the browser asks
+     for weather itself after this comes back.)
+  5. send empty risk summaries + a provisional "best road" (shortest time).
+     the frontend fills in weather, risk, and the real recommendation.
 """
 import logging
 import time
 from datetime import datetime, timedelta, timezone
 
-from .check_points import count_scary_miles, make_check_points
+from .check_points import make_check_points
 from .errors import TripPlanningError
 from .find_places import find_where_place_is
 from .get_roads import get_the_roads
-from .get_weather import as_utc, get_the_weather, iso, look_up_weather
+from .get_weather import as_utc, iso
 from .heat_dots import FORECAST_HOURS, make_heat_dots, make_heat_times
 from .map_math import squish_the_line
-from .pick_road import pick_best_road
-from .scary_rules import SCARY_LEVELS, check_if_scary
+from .scary_rules import SCARY_LEVELS
 
 log = logging.getLogger(__name__)
 
@@ -40,9 +40,23 @@ def check_the_departure_time(departure_utc):
         raise TripPlanningError(f"Departure can't be more than {FARTHEST_PAST_DAYS} days in the past.")
 
 
+def empty_summary(checkpoint_count):
+    """zeroed-out risk summary so the JSON shape stays the same until the browser fills it in"""
+    return {
+        "miles_by_level": {level: 0.0 for level in SCARY_LEVELS},
+        "severe_miles": 0.0,
+        "high_miles": 0.0,
+        "no_travel_miles": 0.0,
+        "avg_risk": 1.0,
+        "worst_level": "Low",
+        "has_no_travel": False,
+        "checkpoint_count": checkpoint_count,
+    }
+
+
 def pack_checkpoint(cp):
-    """rounds the numbers and makes times into text so it fits in JSON nicely"""
-    wx = cp["weather"]
+    """rounds the numbers and makes times into text. weather/risk are null on purpose
+    (the browser fills those in after it asks Open-Meteo itself)"""
     return {
         "index": cp["index"],
         "mile": round(cp["mile"], 1),
@@ -51,14 +65,8 @@ def pack_checkpoint(cp):
         "eta": iso(cp["eta"]),
         "hours_from_departure": round(cp["hours_from_departure"], 3),
         "miles_covered": round(cp["miles_covered"], 2),
-        "weather": {
-            "wind_mph": round(wx["wind_mph"], 1),
-            "gust_mph": round(wx["gust_mph"], 1) if wx["gust_mph"] is not None else None,
-            "rain_in_hr": round(wx["rain_in_hr"], 3),
-            "snow_in_hr": round(wx["snow_in_hr"], 2),
-            "temp_f": round(wx["temp_f"], 1) if wx["temp_f"] is not None else None,
-        },
-        "risk": cp["risk"],
+        "weather": None,
+        "risk": None,
     }
 
 
@@ -74,35 +82,25 @@ def plan_the_trip(origin_text, destination_text, departure, load_lbs, sample_mil
     # step 2: get the roads
     roads, warnings = get_the_roads(origin, destination)
 
-    # step 3: checkpoints with ETAs
+    # step 3: checkpoints with ETAs (no weather yet)
     for road in roads:
         road["checkpoints"] = make_check_points(road, sample_miles, departure_utc)
+        road["summary"] = empty_summary(len(road["checkpoints"]))
 
-    # step 4: weather for the checkpoints only (usually just 1 request!)
-    # we used to also ask for like 140 heatmap dots here, but Render shares its
-    # internet address with a bunch of other apps so Open-Meteo kept saying
-    # "too many requests" (429). now the browser asks for the heat dots itself.
-    longest_trip = max(r["duration_seconds"] for r in roads)
-    window_end = departure_utc + timedelta(seconds=longest_trip)
-    checkpoint_spots = [(cp["lat"], cp["lon"]) for r in roads for cp in r["checkpoints"]]
-    weather = get_the_weather(checkpoint_spots, departure_utc, window_end)
-
-    # step 5: how scary is each checkpoint
-    for road in roads:
-        for cp in road["checkpoints"]:
-            cp["weather"] = look_up_weather(weather, cp["lat"], cp["lon"], cp["eta"])
-            cp["risk"] = check_if_scary(cp["weather"], load_lbs)
-        road["summary"] = count_scary_miles(road["checkpoints"])
-
-    # step 6: name the roads (in the order OSRM gave them) and pick the winner
+    # step 4: name the roads. provisional rank = fastest first (weather ties are all zero
+    # so the real pick happens in the browser after Open-Meteo answers)
     for i, road in enumerate(roads):
         road["id"] = chr(ord("a") + i)
         road["label"] = ROAD_NAMES[i] if i < len(ROAD_NAMES) else f"Route {i + 1}"
-    ranked, reason = pick_best_road(roads)
-    best = ranked[0]
 
-    # step 7: heatmap dots + times for the slider. NO weather in here on purpose,
-    # the frontend fills in the wind/rain/snow/risk frames straight from Open-Meteo
+    ranked_by_time = sorted(roads, key=lambda r: r["duration_seconds"])
+    for rank, road in enumerate(ranked_by_time, start=1):
+        road["rank"] = rank
+        road["recommended"] = rank == 1
+    provisional = ranked_by_time[0]
+    provisional_reason = "Checking weather… ranking will update once the forecast lands."
+
+    # step 5: heatmap dots + times for the slider. NO weather in here.
     heat_dots = make_heat_dots(roads)
     heat_times = make_heat_times(departure_utc)
 
@@ -127,8 +125,15 @@ def plan_the_trip(origin_text, destination_text, departure, load_lbs, sample_mil
             }
         )
 
+    checkpoint_count = sum(len(r["checkpoints"]) for r in packed_roads)
     took = time.perf_counter() - started
-    log.info("planned trip %s -> %s in %.1fs (%d weather spots)", origin_text, destination_text, took, len(weather))
+    log.info(
+        "planned trip %s -> %s in %.1fs (%d checkpoints, weather deferred to client)",
+        origin_text,
+        destination_text,
+        took,
+        checkpoint_count,
+    )
 
     return {
         "origin": origin,
@@ -137,8 +142,13 @@ def plan_the_trip(origin_text, destination_text, departure, load_lbs, sample_mil
         "load_lbs": load_lbs,
         "sample_miles": sample_miles,
         "risk_levels": SCARY_LEVELS,
+        "needs_client_weather": True,
         "routes": packed_roads,
-        "recommendation": {"route_id": best["id"], "label": best["label"], "reason": reason},
+        "recommendation": {
+            "route_id": provisional["id"],
+            "label": provisional["label"],
+            "reason": provisional_reason,
+        },
         "heatmap": {
             "hours": list(range(FORECAST_HOURS + 1)),
             "times": [iso(t) for t in heat_times],
@@ -150,5 +160,10 @@ def plan_the_trip(origin_text, destination_text, departure, load_lbs, sample_mil
             "risk": [],
         },
         "warnings": warnings,
-        "meta": {"took_seconds": round(took, 2), "weather_spots": len(weather), "heat_dots": len(heat_dots)},
+        "meta": {
+            "took_seconds": round(took, 2),
+            "weather_spots": checkpoint_count,  # how many the browser will ask about
+            "heat_dots": len(heat_dots),
+            "needs_client_weather": True,
+        },
     }

@@ -22,11 +22,14 @@ const TILE_CREDITS = 'Tiles &copy; Esri, HERE, Garmin &middot; &copy; OpenStreet
 // zooms the map so the whole trip fits on screen (only when a new trip comes in)
 function ZoomToTheTrip({ plan }) {
   const map = useMap()
+  // only zoom when a NEW trip arrives (not when weather/risk fills in later)
+  const tripKey = plan ? `${plan.departure}|${plan.origin?.lat}|${plan.destination?.lat}` : null
   useEffect(() => {
     if (!plan) return
     const allDots = plan.routes.flatMap((r) => r.geometry)
     if (allDots.length) map.flyToBounds(L.latLngBounds(allDots), { padding: [40, 40], duration: 0.8 })
-  }, [plan, map])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tripKey, map])
   return null
 }
 
@@ -104,8 +107,9 @@ function makePinIcon(text, color) {
 const START_PIN = makePinIcon('Start', '#001830')
 const END_PIN = makePinIcon('End', '#F84858')
 
-export default function TripMap({ plan, pickedRouteId, onPickRoute, heatHour, heatKind, heatIsOn, focusedIndex }) {
+export default function TripMap({ plan, pickedRouteId, onPickRoute, heatHour, heatKind, heatIsOn, focusedIndex, weatherStatus }) {
   const markerRefs = useRef({})
+  void weatherStatus // used by parent for overlay; markers use per-cp nulls
   const pickedRoute = plan?.routes.find((r) => r.id === pickedRouteId)
 
   // only remake heat dots when the hour / kind / trip actually changes
@@ -154,35 +158,55 @@ export default function TripMap({ plan, pickedRouteId, onPickRoute, heatHour, he
           )
         })}
 
-        {pickedRoute?.checkpoints.map((cp) => (
-          <CircleMarker
-            key={`${pickedRoute.id}-${cp.index}`}
-            ref={(m) => (markerRefs.current[cp.index] = m)}
-            center={[cp.lat, cp.lon]}
-            radius={cp.index === focusedIndex ? 9 : 6}
-            pathOptions={{ color: '#fff', weight: 2, fillColor: colorForScaryLevel(cp.risk.level), fillOpacity: 1 }}
-          >
-            <Popup>
-              <div className="cp-popup">
-                <div className="cp-popup__head" style={{ background: colorForScaryLevel(cp.risk.level) }}>
-                  {cp.risk.level}
+        {pickedRoute?.checkpoints.map((cp) => {
+          const level = cp.risk?.level || 'Low'
+          const waiting = !cp.weather || !cp.risk
+          return (
+            <CircleMarker
+              key={`${pickedRoute.id}-${cp.index}`}
+              ref={(m) => (markerRefs.current[cp.index] = m)}
+              center={[cp.lat, cp.lon]}
+              radius={cp.index === focusedIndex ? 9 : 6}
+              pathOptions={{
+                color: '#fff',
+                weight: 2,
+                fillColor: waiting ? '#94a3b8' : colorForScaryLevel(level),
+                fillOpacity: waiting ? 0.6 : 1,
+              }}
+            >
+              <Popup>
+                <div className="cp-popup">
+                  <div
+                    className="cp-popup__head"
+                    style={{ background: waiting ? '#64748b' : colorForScaryLevel(level) }}
+                  >
+                    {waiting ? 'Checking weather…' : level}
+                  </div>
+                  <div>
+                    <b>Mile {cp.mile.toFixed(0)}</b> on {pickedRoute.label}
+                  </div>
+                  <div>ETA {prettyDateTime(cp.eta)}</div>
+                  {waiting ? (
+                    <div>Weather loading from your browser…</div>
+                  ) : (
+                    <>
+                      <div>
+                        Wind {cp.weather.wind_mph.toFixed(0)} mph
+                        {cp.weather.gust_mph != null ? ` (gusts ${cp.weather.gust_mph.toFixed(0)})` : ''}
+                      </div>
+                      <div>Rain {cp.weather.rain_in_hr.toFixed(2)} in/hr</div>
+                      <div>Snow {cp.weather.snow_in_hr.toFixed(2)} in/hr</div>
+                      {cp.weather.temp_f != null && <div>Temp {cp.weather.temp_f.toFixed(0)}°F</div>}
+                      {cp.risk.reasons.length > 0 && (
+                        <div className="cp-popup__why">Why: {cp.risk.reasons.join('; ')}</div>
+                      )}
+                    </>
+                  )}
                 </div>
-                <div>
-                  <b>Mile {cp.mile.toFixed(0)}</b> on {pickedRoute.label}
-                </div>
-                <div>ETA {prettyDateTime(cp.eta)}</div>
-                <div>
-                  Wind {cp.weather.wind_mph.toFixed(0)} mph
-                  {cp.weather.gust_mph != null ? ` (gusts ${cp.weather.gust_mph.toFixed(0)})` : ''}
-                </div>
-                <div>Rain {cp.weather.rain_in_hr.toFixed(2)} in/hr</div>
-                <div>Snow {cp.weather.snow_in_hr.toFixed(2)} in/hr</div>
-                {cp.weather.temp_f != null && <div>Temp {cp.weather.temp_f.toFixed(0)}°F</div>}
-                {cp.risk.reasons.length > 0 && <div className="cp-popup__why">Why: {cp.risk.reasons.join('; ')}</div>}
-              </div>
-            </Popup>
-          </CircleMarker>
-        ))}
+              </Popup>
+            </CircleMarker>
+          )
+        })}
 
         {plan &&
           plan.routes.map((route) => {
