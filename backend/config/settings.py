@@ -64,6 +64,8 @@ TEMPLATES = [
 # we dont save anything in a database. no users, no models, nothing. so no db!
 DATABASES = {}
 
+# cache lives in memory (each gunicorn worker has its own). thats fine on Render,
+# it just means we remember weather for 20 min so we dont bug Open-Meteo again.
 CACHES = {
     "default": {
         "BACKEND": "django.core.cache.backends.locmem.LocMemCache",

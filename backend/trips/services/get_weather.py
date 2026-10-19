@@ -13,10 +13,9 @@ super clear what is going on:
 Open-Meteo hourly rain/snow at hour T is the total for the hour BEFORE T,
 which is basically an in/hr rate. we interpolate between hours to the exact ETA.
 """
-import hashlib
 import logging
 import math
-from concurrent.futures import ThreadPoolExecutor
+import time
 from datetime import timedelta, timezone
 
 import requests
@@ -32,13 +31,26 @@ KMH_TO_MPH = 0.621371
 MM_TO_INCHES = 1 / 25.4
 CM_TO_INCHES = 1 / 2.54
 
-SPOTS_PER_REQUEST = 60  # keeps the URL short enough
+SPOTS_PER_REQUEST = 40  # smaller groups so Open-Meteo doesnt get mad at us
 HOURLY_STUFF = "wind_speed_10m,wind_gusts_10m,rain,showers,snowfall,temperature_2m"
+
+# Open-Meteo gets grumpy (HTTP 429) if we ask too fast. so we go one at a time,
+# take a little nap between asks, and if it still says "slow down" we wait
+# longer and longer before trying again.
+NAP_BETWEEN_ASKS = 0.6  # seconds
+WAIT_TIMES_WHEN_TOO_FAST = (2, 5, 10)  # seconds, gets bigger each time
+REMEMBER_WEATHER_FOR = 60 * 20  # 20 minutes
 
 
 def round_spot(lat, lon):
-    """rounds a spot to ~1 km so nearby spots share the same weather lookup"""
-    return (round(lat, 2), round(lon, 2))
+    """rounds a spot to ~5 km so nearby spots share the same weather lookup"""
+    # weather models are like 3-10 km boxes anyway so this barely changes anything
+    return (round(round(lat * 20) / 20, 2), round(round(lon * 20) / 20, 2))
+
+
+def memory_name(spot, start_hour, end_hour):
+    """the name we save one spot's weather under in the cache"""
+    return f"wx1:{spot[0]:.2f},{spot[1]:.2f}|{start_hour:%Y%m%d%H}|{end_hour:%Y%m%d%H}"
 
 
 def ask_open_meteo(spots, start_hour, end_hour):
@@ -54,29 +66,56 @@ def ask_open_meteo(spots, start_hour, end_hour):
         "wind_speed_unit": "kmh",
         "precipitation_unit": "mm",
     }
-    cache_key = "wx:" + hashlib.sha1(
-        f"{params['latitude']}|{params['longitude']}|{params['start_hour']}|{params['end_hour']}".encode()
-    ).hexdigest()
-    remembered = cache.get(cache_key)
-    if remembered is not None:
-        return remembered
 
     last_error = None
-    for attempt in range(2):  # try twice, sometimes the internet hiccups
+    too_fast_count = 0
+    other_fails = 0
+    while True:
         try:
             resp = requests.get(settings.OPEN_METEO_URL, params=params, timeout=settings.HTTP_TIMEOUT_SECONDS)
-            if resp.status_code == 429:
-                raise OutsideApiBroke("Open-Meteo rate limit hit (too many requests). Wait a minute and try again.")
-            data = resp.json()
-            if isinstance(data, dict) and data.get("error"):
-                raise OutsideApiBroke(f"Open-Meteo said: {data.get('reason')}")
-            answers = data if isinstance(data, list) else [data]
-            cache.set(cache_key, answers, 60 * 20)
-            return answers
-        except (requests.RequestException, ValueError) as exc:
+        except requests.RequestException as exc:
             last_error = exc
-            log.warning("open-meteo attempt %s failed: %s", attempt + 1, exc)
-    raise OutsideApiBroke(f"Weather service (Open-Meteo) failed: {last_error}")
+            other_fails += 1
+            log.warning("open-meteo attempt failed: %s", exc)
+            if other_fails >= 2:  # try twice, sometimes the internet hiccups
+                raise OutsideApiBroke(f"Weather service (Open-Meteo) failed: {last_error}") from exc
+            time.sleep(1)
+            continue
+
+        if resp.status_code == 429:
+            if too_fast_count >= len(WAIT_TIMES_WHEN_TOO_FAST):
+                raise OutsideApiBroke("Open-Meteo rate limit hit (too many requests). Wait a minute and try again.")
+            nap = wait_how_long(resp, too_fast_count)
+            too_fast_count += 1
+            log.warning("open-meteo said slow down (429), napping %.1fs (try %s)", nap, too_fast_count)
+            time.sleep(nap)
+            continue
+
+        try:
+            data = resp.json()
+        except ValueError as exc:
+            last_error = exc
+            other_fails += 1
+            if other_fails >= 2:
+                raise OutsideApiBroke(f"Weather service (Open-Meteo) failed: {last_error}") from exc
+            time.sleep(1)
+            continue
+
+        if isinstance(data, dict) and data.get("error"):
+            raise OutsideApiBroke(f"Open-Meteo said: {data.get('reason')}")
+        return data if isinstance(data, list) else [data]
+
+
+def wait_how_long(resp, try_number):
+    """how long to nap after a 429. if Open-Meteo tells us (Retry-After) we listen, kinda"""
+    nap = WAIT_TIMES_WHEN_TOO_FAST[try_number]
+    told_us = resp.headers.get("Retry-After") if resp is not None else None
+    try:
+        if told_us:
+            nap = max(nap, min(float(told_us), 15.0))  # dont wait forever tho
+    except ValueError:
+        pass
+    return nap
 
 
 def turn_into_truck_units(hourly):
@@ -110,15 +149,29 @@ def get_the_weather(spots, start_utc, end_utc):
     end_hour = end_utc.replace(minute=0, second=0, microsecond=0) + timedelta(hours=2)
 
     unique = list(dict.fromkeys(round_spot(lat, lon) for lat, lon in spots))
-    groups = [unique[i : i + SPOTS_PER_REQUEST] for i in range(0, len(unique), SPOTS_PER_REQUEST)]
 
-    with ThreadPoolExecutor(max_workers=4) as pool:
-        results = list(pool.map(lambda g: ask_open_meteo(g, start_hour, end_hour), groups))
-
+    # first check our memory (cache) so we dont ask for the same spot twice
     weather = {}
-    for group, answers in zip(groups, results):
+    still_need = []
+    for spot in unique:
+        remembered = cache.get(memory_name(spot, start_hour, end_hour))
+        if remembered is not None:
+            weather[spot] = remembered
+        else:
+            still_need.append(spot)
+
+    groups = [still_need[i : i + SPOTS_PER_REQUEST] for i in range(0, len(still_need), SPOTS_PER_REQUEST)]
+    log.info("weather: %s spots, %s from cache, %s requests", len(unique), len(weather), len(groups))
+
+    # one group at a time (no more 4 at once, thats what got us rate limited)
+    for i, group in enumerate(groups):
+        if i > 0:
+            time.sleep(NAP_BETWEEN_ASKS)
+        answers = ask_open_meteo(group, start_hour, end_hour)
         for spot, answer in zip(group, answers):
-            weather[spot] = turn_into_truck_units(answer.get("hourly", {}))
+            series = turn_into_truck_units(answer.get("hourly", {}))
+            weather[spot] = series
+            cache.set(memory_name(spot, start_hour, end_hour), series, REMEMBER_WEATHER_FOR)
     return weather
 
 

@@ -14,7 +14,7 @@ from .scary_rules import quick_scary_score
 
 FORECAST_HOURS = 48
 CORRIDOR_MILES = 18  # how far left/right of the road we look
-MAX_DOTS = 330
+MAX_DOTS = 140  # less dots = less weather asks = no rate limit
 
 
 def make_heat_dots(roads, max_dots=MAX_DOTS):
@@ -22,13 +22,13 @@ def make_heat_dots(roads, max_dots=MAX_DOTS):
     makes the corridor dots. we snap them to a grid so roads that overlap
     dont make double dots (double dots = extra api calls = slow).
     """
-    grid = 0.12
+    grid = 0.15
     while True:
         seen = {}
         for road in roads:
             coords, cum = road["coords"], road["cum_miles"]
             total = cum[-1]
-            step = max(8.0, total / 28)
+            step = max(12.0, total / 22)
             m = 0.0
             idx = 0
             while m <= total + 0.01:
