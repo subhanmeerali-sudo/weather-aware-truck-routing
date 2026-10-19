@@ -3,8 +3,9 @@ Heatmap dots for the trip corridor.
 
 we spread dots along every road AND a bit to the left and right of it (the
 "corridor"), so the heatmap looks like a wide band instead of a skinny line.
-then for every hour from 0 to 48 after departure we figure out the weather
-at each dot. the frontend slider just flips between these hours (fast!).
+the server only makes the dots + the 0..48 hour times. the BROWSER asks
+Open-Meteo for the dot weather (so the server doesnt get rate limited).
+make_heat_frames is still here for tests / if we ever want it server side again.
 """
 from datetime import timedelta
 
@@ -47,6 +48,11 @@ def make_heat_dots(roads, max_dots=MAX_DOTS):
         if len(seen) <= max_dots:
             return list(seen.values())
         grid *= 1.25  # too many dots, make the grid chunkier and try again
+
+
+def make_heat_times(departure_utc):
+    """the times for hour 0, 1, 2 ... 48 after leaving"""
+    return [departure_utc + timedelta(hours=hour) for hour in range(FORECAST_HOURS + 1)]
 
 
 def make_heat_frames(dots, weather, departure_utc, load_lbs):

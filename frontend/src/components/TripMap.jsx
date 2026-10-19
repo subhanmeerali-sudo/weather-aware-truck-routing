@@ -32,7 +32,7 @@ function ZoomToTheTrip({ plan }) {
 
 // turns the heatmap numbers for one hour into [lat, lon, score] dots
 function makeHeatDots(heatmap, hour, kind, loadLbs) {
-  if (!heatmap) return []
+  if (!heatmap || !heatmap.risk || !heatmap.risk[hour]) return [] // weather not here yet (still loading)
   return heatmap.points.map(([lat, lon], i) => {
     let score
     if (kind === 'wind') score = howScaryIsWind(heatmap.wind_mph[hour][i], loadLbs)

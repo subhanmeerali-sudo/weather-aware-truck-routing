@@ -9,7 +9,7 @@ const KINDS = [
 ]
 
 // the 0-48 hour slider that moves the heatmap thru time. it can also play like a movie
-export default function HeatControls({ heatmap, hour, setHour, kind, setKind, isOn, setIsOn, isPlaying, setIsPlaying }) {
+export default function HeatControls({ heatmap, heatStatus, hour, setHour, kind, setKind, isOn, setIsOn, isPlaying, setIsPlaying }) {
   const maxHour = heatmap.hours[heatmap.hours.length - 1]
 
   // when playing, bump the hour forward every little bit. goes back to 0 at the end
@@ -64,7 +64,17 @@ export default function HeatControls({ heatmap, hour, setHour, kind, setKind, is
         <span>+36h</span>
         <span>+48h</span>
       </div>
-      <p className="heat-controls__hint">Corridor forecast at departure + {hour}h. 🚚 = where each truck would be.</p>
+      {heatStatus === 'loading' && (
+        <p className="heat-controls__hint heat-controls__loading">
+          <span className="spinner" /> Loading corridor forecast…
+        </p>
+      )}
+      {heatStatus === 'oops' && (
+        <p className="heat-controls__hint">Couldn&apos;t load the corridor forecast right now (routes + checkpoints still work).</p>
+      )}
+      {heatStatus !== 'loading' && heatStatus !== 'oops' && (
+        <p className="heat-controls__hint">Corridor forecast at departure + {hour}h. 🚚 = where each truck would be.</p>
+      )}
     </div>
   )
 }

@@ -180,3 +180,7 @@ input, select { font: inherit; }
   .legend { font-size: 0.7rem; padding: 6px 8px; }
   .heat-controls__time span { display: block; margin-left: 0; font-size: 0.75rem; }
 }
+
+/* little "loading corridor forecast" line under the slider (shows on phones too) */
+.heat-controls__loading { display: flex !important; align-items: center; gap: 6px; color: var(--white); }
+.heat-controls__loading .spinner { width: 12px; height: 12px; border-width: 2px; }

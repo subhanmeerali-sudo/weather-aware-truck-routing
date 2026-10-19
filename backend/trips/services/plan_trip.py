@@ -4,7 +4,8 @@ The big boss function that runs the whole trip plan, step by step:
   1. find where the places are (geocode)
   2. get 3 roads (OSRM)
   3. drop checkpoints on each road + figure out ETAs
-  4. get the weather for every checkpoint + heatmap dot (Open-Meteo, batched)
+  4. get the weather for every checkpoint ONLY (Open-Meteo, batched)
+     (the heatmap dots get their weather from the browser now, see below)
   5. decide how scary each checkpoint is
   6. pick the best road
   7. pack it all up for the frontend
@@ -18,7 +19,7 @@ from .errors import TripPlanningError
 from .find_places import find_where_place_is
 from .get_roads import get_the_roads
 from .get_weather import as_utc, get_the_weather, iso, look_up_weather
-from .heat_dots import FORECAST_HOURS, make_heat_dots, make_heat_frames
+from .heat_dots import FORECAST_HOURS, make_heat_dots, make_heat_times
 from .map_math import squish_the_line
 from .pick_road import pick_best_road
 from .scary_rules import SCARY_LEVELS, check_if_scary
@@ -77,13 +78,14 @@ def plan_the_trip(origin_text, destination_text, departure, load_lbs, sample_mil
     for road in roads:
         road["checkpoints"] = make_check_points(road, sample_miles, departure_utc)
 
-    # step 4: weather for everything in one big (batched) go
-    heat_dots = make_heat_dots(roads)
+    # step 4: weather for the checkpoints only (usually just 1 request!)
+    # we used to also ask for like 140 heatmap dots here, but Render shares its
+    # internet address with a bunch of other apps so Open-Meteo kept saying
+    # "too many requests" (429). now the browser asks for the heat dots itself.
     longest_trip = max(r["duration_seconds"] for r in roads)
     window_end = departure_utc + timedelta(seconds=longest_trip)
-    window_end = max(window_end, departure_utc + timedelta(hours=FORECAST_HOURS))
-    all_spots = [(cp["lat"], cp["lon"]) for r in roads for cp in r["checkpoints"]] + heat_dots
-    weather = get_the_weather(all_spots, departure_utc, window_end)
+    checkpoint_spots = [(cp["lat"], cp["lon"]) for r in roads for cp in r["checkpoints"]]
+    weather = get_the_weather(checkpoint_spots, departure_utc, window_end)
 
     # step 5: how scary is each checkpoint
     for road in roads:
@@ -99,8 +101,10 @@ def plan_the_trip(origin_text, destination_text, departure, load_lbs, sample_mil
     ranked, reason = pick_best_road(roads)
     best = ranked[0]
 
-    # step 7: heatmap frames for the slider
-    heat_times, frames = make_heat_frames(heat_dots, weather, departure_utc, load_lbs)
+    # step 7: heatmap dots + times for the slider. NO weather in here on purpose,
+    # the frontend fills in the wind/rain/snow/risk frames straight from Open-Meteo
+    heat_dots = make_heat_dots(roads)
+    heat_times = make_heat_times(departure_utc)
 
     packed_roads = []
     for road in sorted(roads, key=lambda r: r["id"]):
@@ -139,8 +143,12 @@ def plan_the_trip(origin_text, destination_text, departure, load_lbs, sample_mil
             "hours": list(range(FORECAST_HOURS + 1)),
             "times": [iso(t) for t in heat_times],
             "points": [[lat, lon] for lat, lon in heat_dots],
-            **frames,
+            "needs_client_weather": True,
+            "wind_mph": [],
+            "rain_in_hr": [],
+            "snow_in_hr": [],
+            "risk": [],
         },
         "warnings": warnings,
-        "meta": {"took_seconds": round(took, 2), "weather_spots": len(weather)},
+        "meta": {"took_seconds": round(took, 2), "weather_spots": len(weather), "heat_dots": len(heat_dots)},
     }
